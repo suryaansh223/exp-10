@@ -1,0 +1,1071 @@
+PROJECT DOCUMENTATION
+=====================
+
+
+
+--- FILE START: src\App.tsx ---
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { AuthProvider } from './context/AuthContext';
+import Layout from './components/Layout';
+import Login from './pages/Login';
+import Dashboard from './pages/Dashboard';
+import Shifts from './pages/Shifts';
+import CreateShift from './pages/CreateShift';
+import Announcements from './pages/Announcements';
+
+function App() {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          
+          <Route path="/" element={<Layout><Dashboard /></Layout>} />
+          <Route path="/shifts" element={<Layout><Shifts /></Layout>} />
+          <Route path="/shifts/create" element={<Layout><CreateShift /></Layout>} />
+          <Route path="/announcements" element={<Layout><Announcements /></Layout>} />
+          
+          {/* Fallback route */}
+          <Route path="*" element={<Layout><Dashboard /></Layout>} />
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
+  );
+}
+
+export default App;
+--- FILE END: src\App.tsx ---
+
+
+--- FILE START: src\components\Layout.tsx ---
+import type { ReactNode } from 'react';
+import Sidebar from './Sidebar';
+import { useAuth } from '../context/AuthContext';
+import { Navigate } from 'react-router-dom';
+import { LogOut } from 'lucide-react';
+
+export default function Layout({ children }: { children: ReactNode }) {
+  const { user, signOut } = useAuth();
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return (
+    <div className="flex h-screen bg-gray-50">
+      <Sidebar />
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <header className="bg-white shadow-sm h-16 flex items-center justify-between px-6 shrink-0 z-10">
+          <h2 className="text-xl font-semibold text-gray-800">
+            Welcome back, {user.firstName || user.email?.split('@')[0]}
+          </h2>
+          <button 
+            onClick={signOut}
+            className="flex items-center gap-2 text-sm text-gray-600 hover:text-red-600 transition-colors"
+          >
+            <LogOut className="w-4 h-4" />
+            Sign Out
+          </button>
+        </header>
+        <main className="flex-1 overflow-x-hidden overflow-y-auto bg-gray-50 p-6">
+          {children}
+        </main>
+      </div>
+    </div>
+  );
+}
+--- FILE END: src\components\Layout.tsx ---
+
+
+--- FILE START: src\components\Sidebar.tsx ---
+import { NavLink } from 'react-router-dom';
+import { CalendarDays, LayoutDashboard, Users, User, Bell } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { cn } from '../lib/utils';
+
+const navItems = [
+  { icon: LayoutDashboard, label: 'Dashboard', to: '/' },
+  { icon: CalendarDays, label: 'Shifts', to: '/shifts' },
+  { icon: Bell, label: 'Announcements', to: '/announcements' },
+];
+
+export default function Sidebar() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+
+  return (
+    <aside className="w-64 bg-indigo-900 text-white flex flex-col">
+      <div className="h-16 flex items-center justify-center border-b border-indigo-800 shrink-0">
+        <h1 className="text-2xl font-bold tracking-tight">VolunTrack</h1>
+      </div>
+      
+      <nav className="flex-1 py-4 overflow-y-auto">
+        <ul className="space-y-1 px-3">
+          {navItems.map((item) => (
+            <li key={item.to}>
+              <NavLink
+                to={item.to}
+                className={({ isActive }) =>
+                  cn(
+                    'flex items-center gap-3 px-3 py-2 rounded-md transition-colors',
+                    isActive ? 'bg-indigo-800 text-white' : 'text-indigo-200 hover:bg-indigo-800/50 hover:text-white'
+                  )
+                }
+              >
+                <item.icon className="w-5 h-5" />
+                {item.label}
+              </NavLink>
+            </li>
+          ))}
+          {isAdmin && (
+            <li>
+              <NavLink
+                to="/volunteers"
+                className={({ isActive }) =>
+                  cn(
+                    'flex items-center gap-3 px-3 py-2 rounded-md transition-colors',
+                    isActive ? 'bg-indigo-800 text-white' : 'text-indigo-200 hover:bg-indigo-800/50 hover:text-white'
+                  )
+                }
+              >
+                <Users className="w-5 h-5" />
+                Volunteers (Admin)
+              </NavLink>
+            </li>
+          )}
+        </ul>
+      </nav>
+
+      <div className="p-4 border-t border-indigo-800">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-indigo-700 flex items-center justify-center text-indigo-200">
+            <User className="w-5 h-5" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium truncate">{user?.email}</p>
+            <p className="text-xs text-indigo-300 capitalize">{user?.role || 'Volunteer'}</p>
+          </div>
+        </div>
+      </div>
+    </aside>
+  );
+}
+--- FILE END: src\components\Sidebar.tsx ---
+
+
+--- FILE START: src\context\AuthContext.tsx ---
+import { createContext, useContext, useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
+import { onAuthStateChanged, signOut as firebaseSignOut } from 'firebase/auth';
+import type { User } from 'firebase/auth';
+import { doc, getDoc } from 'firebase/firestore';
+import { auth, db } from '../lib/firebase';
+
+interface UserProfile extends User {
+  role?: 'admin' | 'volunteer';
+  firstName?: string;
+  lastName?: string;
+}
+
+interface AuthContextType {
+  user: UserProfile | null;
+  loading: boolean;
+  signOut: () => Promise<void>;
+}
+
+const AuthContext = createContext<AuthContextType>({} as AuthContextType);
+
+export const AuthProvider = ({ children }: { children: ReactNode }) => {
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        // Fetch custom user data from Firestore
+        try {
+          const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+          if (userDoc.exists()) {
+            setUser({ ...firebaseUser, ...userDoc.data() });
+          } else {
+            setUser(firebaseUser); // fallback if no doc exists yet
+          }
+        } catch (error) {
+          console.error("Error fetching user data:", error);
+          setUser(firebaseUser);
+        }
+      } else {
+        setUser(null);
+      }
+      setLoading(false);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  const signOut = async () => {
+    await firebaseSignOut(auth);
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, loading, signOut }}>
+      {!loading && children}
+    </AuthContext.Provider>
+  );
+};
+
+export const useAuth = () => useContext(AuthContext);
+--- FILE END: src\context\AuthContext.tsx ---
+
+
+--- FILE START: src\lib\firebase.ts ---
+import { initializeApp } from 'firebase/app';
+import { getAuth } from 'firebase/auth';
+import { getFirestore } from 'firebase/firestore';
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSy_MOCK_KEY_REPLACE_ME",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "voluntrack-core.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "voluntrack-core",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "voluntrack-core.appspot.com",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "1234567890",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:1234567890:web:abc123def456"
+};
+
+const app = initializeApp(firebaseConfig);
+export const auth = getAuth(app);
+export const db = getFirestore(app);
+
+--- FILE END: src\lib\firebase.ts ---
+
+
+--- FILE START: src\lib\utils.ts ---
+import { type ClassValue, clsx } from 'clsx'
+import { twMerge } from 'tailwind-merge'
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+
+--- FILE END: src\lib\utils.ts ---
+
+
+--- FILE START: src\main.tsx ---
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App.tsx';
+import './index.css';
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);
+--- FILE END: src\main.tsx ---
+
+
+--- FILE START: src\pages\Announcements.tsx ---
+import { useEffect, useState } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { collection, query, orderBy, onSnapshot, addDoc, Timestamp } from 'firebase/firestore';
+import { db } from '../lib/firebase';
+import { Megaphone, MessageSquare, Clock } from 'lucide-react';
+
+interface Announcement {
+  id: string;
+  title: string;
+  message: string;
+  postedAt: any;
+  authorName: string;
+}
+
+export default function Announcements() {
+  const { user } = useAuth();
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [loading, setLoading] = useState(true);
+  
+  // Form state
+  const [title, setTitle] = useState('');
+  const [message, setMessage] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    const q = query(collection(db, 'announcements'), orderBy('postedAt', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as Announcement[];
+      setAnnouncements(data);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!title.trim() || !message.trim()) return;
+    
+    setIsSubmitting(true);
+    try {
+      await addDoc(collection(db, 'announcements'), {
+        title,
+        message,
+        postedAt: Timestamp.now(),
+        authorName: user?.firstName ? `${user.firstName} ${user.lastName || ''}` : user?.email?.split('@')[0] || 'Admin',
+        authorId: user?.uid,
+      });
+      setTitle('');
+      setMessage('');
+    } catch (error) {
+      console.error("Error posting announcement:", error);
+      alert("Failed to post announcement.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto space-y-8">
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Announcements</h1>
+        <p className="text-gray-500 text-sm mt-1">Stay updated with the latest news and urgent requirements.</p>
+      </div>
+
+      {user?.role === 'admin' && (
+        <div className="bg-white rounded-xl shadow-sm border border-indigo-100 p-6">
+          <div className="flex items-center gap-2 mb-4 text-indigo-900">
+            <Megaphone className="w-5 h-5" />
+            <h2 className="text-lg font-semibold">Post New Announcement</h2>
+          </div>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <input
+                required
+                type="text"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="Announcement Title"
+                className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </div>
+            <div>
+              <textarea
+                required
+                rows={3}
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                placeholder="What do you want to tell the volunteers?"
+                className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="bg-indigo-600 text-white px-6 py-2 rounded-md hover:bg-indigo-700 transition shadow-sm font-medium disabled:opacity-50"
+              >
+                {isSubmitting ? 'Posting...' : 'Post Announcement'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      <div className="space-y-4">
+        {loading ? (
+          <div className="text-center py-8 text-gray-500">Loading announcements...</div>
+        ) : announcements.length === 0 ? (
+          <div className="text-center py-12 bg-white rounded-xl border border-gray-200">
+            <MessageSquare className="mx-auto h-12 w-12 text-gray-300 mb-3" />
+            <p className="text-gray-500 font-medium">No announcements yet.</p>
+          </div>
+        ) : (
+          announcements.map((announcement) => (
+            <div key={announcement.id} className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition">
+              <div className="flex justify-between items-start mb-2">
+                <h3 className="text-xl font-bold text-gray-900">{announcement.title}</h3>
+                <span className="inline-flex items-center text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-md">
+                  <Clock className="w-3 h-3 mr-1" />
+                  {announcement.postedAt?.toDate ? announcement.postedAt.toDate().toLocaleDateString() : 'Just now'}
+                </span>
+              </div>
+              <p className="text-gray-700 whitespace-pre-wrap mt-3">{announcement.message}</p>
+              <div className="mt-4 pt-4 border-t border-gray-50 flex items-center text-sm text-gray-500">
+                <div className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center mr-2 font-bold text-xs">
+                  {announcement.authorName.charAt(0).toUpperCase()}
+                </div>
+                Posted by {announcement.authorName}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+--- FILE END: src\pages\Announcements.tsx ---
+
+
+--- FILE START: src\pages\CreateShift.tsx ---
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { collection, addDoc, Timestamp } from 'firebase/firestore';
+import { db } from '../lib/firebase';
+import { useAuth } from '../context/AuthContext';
+
+export default function CreateShift() {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const [formData, setFormData] = useState({
+    title: '',
+    date: '',
+    startTime: '',
+    endTime: '',
+    location: '',
+    capacity: '',
+    description: '',
+  });
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (user?.role !== 'admin') {
+      setError('Only admins can create shifts.');
+      return;
+    }
+    
+    setLoading(true);
+    setError('');
+
+    try {
+      await addDoc(collection(db, 'shifts'), {
+        title: formData.title,
+        date: formData.date,
+        startTime: formData.startTime,
+        endTime: formData.endTime,
+        location: formData.location,
+        capacity: parseInt(formData.capacity, 10),
+        registeredCount: 0,
+        description: formData.description,
+        status: 'open',
+        createdAt: Timestamp.now(),
+        createdBy: user.uid,
+      });
+      navigate('/shifts');
+    } catch (err: any) {
+      console.error('Error creating shift:', err);
+      setError(err.message || 'Failed to create shift.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (user?.role !== 'admin') {
+    return <div className="p-6 text-red-600">Access denied. Admin only.</div>;
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto space-y-6">
+      <h1 className="text-2xl font-bold text-gray-900">Create New Shift</h1>
+      
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="col-span-1 md:col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Shift Title</label>
+              <input
+                required
+                type="text"
+                name="title"
+                value={formData.title}
+                onChange={handleChange}
+                placeholder="e.g., Weekend Food Drive"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+              <input
+                required
+                type="date"
+                name="date"
+                value={formData.date}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Location</label>
+              <input
+                required
+                type="text"
+                name="location"
+                value={formData.location}
+                onChange={handleChange}
+                placeholder="e.g., Community Center"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Start Time</label>
+              <input
+                required
+                type="time"
+                name="startTime"
+                value={formData.startTime}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">End Time</label>
+              <input
+                required
+                type="time"
+                name="endTime"
+                value={formData.endTime}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </div>
+
+            <div className="col-span-1 md:col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Volunteer Capacity</label>
+              <input
+                required
+                type="number"
+                min="1"
+                name="capacity"
+                value={formData.capacity}
+                onChange={handleChange}
+                placeholder="How many volunteers needed?"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </div>
+
+            <div className="col-span-1 md:col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description & Requirements</label>
+              <textarea
+                required
+                rows={4}
+                name="description"
+                value={formData.description}
+                onChange={handleChange}
+                placeholder="Describe the tasks and any requirements (e.g., heavy lifting, specific skills)."
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </div>
+          </div>
+
+          {error && <div className="text-red-600 text-sm bg-red-50 p-3 rounded-md border border-red-200">{error}</div>}
+
+          <div className="flex justify-end gap-3">
+            <button
+              type="button"
+              onClick={() => navigate('/shifts')}
+              className="px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={loading}
+              className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+            >
+              {loading ? 'Creating...' : 'Create Shift'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+--- FILE END: src\pages\CreateShift.tsx ---
+
+
+--- FILE START: src\pages\Dashboard.tsx ---
+import { useEffect, useState } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { useNavigate } from 'react-router-dom';
+import { Users, Calendar, Clock, CheckCircle } from 'lucide-react';
+import { collection, query, orderBy, onSnapshot, getDocs, where, limit } from 'firebase/firestore';
+import { db } from '../lib/firebase';
+
+function StatCard({ title, value, icon: Icon, colorClass }: any) {
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 flex items-center">
+      <div className={`p-4 rounded-full mr-4 ${colorClass}`}>
+        <Icon className="w-6 h-6 text-white" />
+      </div>
+      <div>
+        <p className="text-sm font-medium text-gray-500">{title}</p>
+        <h3 className="text-2xl font-bold text-gray-900">{value}</h3>
+      </div>
+    </div>
+  );
+}
+
+export default function Dashboard() {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const [stats, setStats] = useState({ totalShifts: 0, upcomingShifts: 0, hoursLogged: 0, activeVolunteers: 0 });
+  const [announcements, setAnnouncements] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    // Fetch stats
+    const fetchStats = async () => {
+      try {
+        const shiftsSnapshot = await getDocs(collection(db, 'shifts'));
+        const totalShifts = shiftsSnapshot.size;
+        
+        let upcomingShifts = 0;
+        const now = new Date();
+        shiftsSnapshot.forEach(doc => {
+          if (new Date(doc.data().date) >= now) {
+            upcomingShifts++;
+          }
+        });
+
+        // Simplified hours logged (rough estimate)
+        let hoursLogged = 0;
+        if (user.role === 'admin') {
+           const assignmentsSnapshot = await getDocs(collection(db, 'assignments'));
+           hoursLogged = assignmentsSnapshot.size * 2; 
+        } else {
+           const q = query(collection(db, 'assignments'), where('userId', '==', user.uid));
+           const assignmentsSnapshot = await getDocs(q);
+           hoursLogged = assignmentsSnapshot.size * 2; 
+        }
+
+        // Active volunteers
+        const usersSnapshot = await getDocs(collection(db, 'users'));
+        const activeVolunteers = usersSnapshot.size || 0;
+
+        setStats({
+          totalShifts,
+          upcomingShifts,
+          hoursLogged,
+          activeVolunteers
+        });
+      } catch (error) {
+        console.error("Error fetching stats:", error);
+      }
+    };
+
+    fetchStats();
+
+    // Fetch latest announcements
+    const q = query(collection(db, 'announcements'), orderBy('postedAt', 'desc'), limit(3));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setAnnouncements(data);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <h1 className="text-2xl font-bold text-gray-900">Dashboard Overview</h1>
+        {user?.role === 'admin' && (
+          <button 
+            onClick={() => navigate('/shifts/create')}
+            className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow hover:bg-indigo-700 transition"
+          >
+            + Create New Shift
+          </button>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <StatCard title="Total Shifts" value={stats.totalShifts} icon={Calendar} colorClass="bg-blue-500" />
+        <StatCard title="Upcoming Shifts" value={stats.upcomingShifts} icon={Clock} colorClass="bg-orange-500" />
+        <StatCard title="Hours Logged" value={stats.hoursLogged} icon={CheckCircle} colorClass="bg-green-500" />
+        {user?.role === 'admin' && (
+          <StatCard title="Active Volunteers" value={stats.activeVolunteers} icon={Users} colorClass="bg-indigo-500" />
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-8">
+        <div className="col-span-2 bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+          <h3 className="text-lg font-semibold text-gray-800 mb-4">Your Upcoming Shifts</h3>
+          <div className="text-gray-500 text-center py-8 bg-gray-50 rounded-lg border-2 border-dashed border-gray-200">
+            No upcoming shifts scheduled.
+          </div>
+        </div>
+        
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+          <h3 className="text-lg font-semibold text-gray-800 mb-4">Announcements</h3>
+          <div className="space-y-4">
+            {announcements.length === 0 ? (
+              <p className="text-sm text-gray-500">No recent announcements.</p>
+            ) : (
+              announcements.map((ann) => (
+                <div key={ann.id} className="p-4 bg-indigo-50 rounded-lg border border-indigo-100 mb-3">
+                  <h4 className="font-medium text-indigo-900">{ann.title}</h4>
+                  <p className="text-sm text-indigo-700 mt-1">{ann.message}</p>
+                  <p className="text-xs text-indigo-400 mt-2">
+                    {ann.postedAt?.toDate ? ann.postedAt.toDate().toLocaleDateString() : 'Recent'}
+                  </p>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+--- FILE END: src\pages\Dashboard.tsx ---
+
+
+--- FILE START: src\pages\Login.tsx ---
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
+import { doc, setDoc } from 'firebase/firestore';
+import { auth, db } from '../lib/firebase';
+import { HeartHandshake } from 'lucide-react';
+
+export default function Login() {
+  const [isRegister, setIsRegister] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+
+    try {
+      if (isRegister) {
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        // Create initial user doc
+        await setDoc(doc(db, 'users', userCredential.user.uid), {
+          email,
+          role: 'volunteer', // default role
+          createdAt: new Date(),
+        });
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
+      navigate('/');
+    } catch (err: any) {
+      setError(err.message || 'Authentication failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
+      <div className="sm:mx-auto sm:w-full sm:max-w-md">
+        <div className="flex justify-center text-indigo-600">
+          <HeartHandshake className="w-16 h-16" />
+        </div>
+        <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
+          {isRegister ? 'Join VolunTrack' : 'Sign in to your account'}
+        </h2>
+        <p className="mt-2 text-center text-sm text-gray-600">
+          Or{' '}
+          <button onClick={() => setIsRegister(!isRegister)} className="font-medium text-indigo-600 hover:text-indigo-500">
+            {isRegister ? 'sign in to an existing account' : 'register a new volunteer account'}
+          </button>
+        </p>
+      </div>
+
+      <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
+        <div className="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10">
+          <form className="space-y-6" onSubmit={handleSubmit}>
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Email address</label>
+              <div className="mt-1">
+                <input
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Password</label>
+              <div className="mt-1">
+                <input
+                  type="password"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                />
+              </div>
+            </div>
+
+            {error && <div className="text-red-600 text-sm">{error}</div>}
+
+            <div>
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+              >
+                {loading ? 'Processing...' : (isRegister ? 'Register' : 'Sign in')}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
+--- FILE END: src\pages\Login.tsx ---
+
+
+--- FILE START: src\pages\Shifts.tsx ---
+import { useEffect, useState } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { Calendar as CalendarIcon, Clock, MapPin, Users, CheckCircle, AlertCircle } from 'lucide-react';
+import { collection, query, orderBy, onSnapshot, doc, runTransaction } from 'firebase/firestore';
+import { db } from '../lib/firebase';
+import { useNavigate } from 'react-router-dom';
+import { cn } from '../lib/utils';
+
+interface Shift {
+  id: string;
+  title: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  location: string;
+  capacity: number;
+  registeredCount: number;
+  description: string;
+  status: string;
+}
+
+export default function Shifts() {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const [shifts, setShifts] = useState<Shift[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [userRegistrations, setUserRegistrations] = useState<Record<string, boolean>>({});
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Listen to all shifts
+    const q = query(collection(db, 'shifts'), orderBy('date', 'asc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const shiftData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as Shift[];
+      setShifts(shiftData);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    // Get user's current registrations
+    const fetchRegistrations = async () => {
+      const q = query(collection(db, 'assignments'));
+      // In a real app, you'd filter by userId, but for demo we can fetch and filter or use composite indexes
+      onSnapshot(q, (snapshot) => {
+        const regs: Record<string, boolean> = {};
+        snapshot.docs.forEach(doc => {
+          const data = doc.data();
+          if (data.userId === user.uid && data.status === 'registered') {
+            regs[data.shiftId] = true;
+          }
+        });
+        setUserRegistrations(regs);
+      });
+    };
+    fetchRegistrations();
+  }, [user]);
+
+  const handleSignUp = async (shift: Shift) => {
+    if (!user) return;
+    setActionLoading(shift.id);
+
+    try {
+      const shiftRef = doc(db, 'shifts', shift.id);
+      const assignmentRef = doc(db, 'assignments', `${shift.id}_${user.uid}`);
+
+      await runTransaction(db, async (transaction) => {
+        const shiftDoc = await transaction.get(shiftRef);
+        if (!shiftDoc.exists()) throw new Error("Shift does not exist!");
+
+        const currentRegistered = shiftDoc.data().registeredCount || 0;
+        const capacity = shiftDoc.data().capacity;
+
+        if (currentRegistered >= capacity) {
+          throw new Error("Shift is already full!");
+        }
+
+        // Check if already registered
+        const assignmentDoc = await transaction.get(assignmentRef);
+        if (assignmentDoc.exists() && assignmentDoc.data().status === 'registered') {
+           throw new Error("Already registered!");
+        }
+
+        // Register
+        transaction.update(shiftRef, { registeredCount: currentRegistered + 1 });
+        transaction.set(assignmentRef, {
+          shiftId: shift.id,
+          userId: user.uid,
+          status: 'registered',
+          registeredAt: new Date(),
+        });
+      });
+
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex justify-center items-center h-64"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div></div>;
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Available Shifts</h1>
+          <p className="text-gray-500 text-sm mt-1">Browse and sign up for upcoming volunteer opportunities.</p>
+        </div>
+        {user?.role === 'admin' && (
+          <button 
+            onClick={() => navigate('/shifts/create')}
+            className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 transition shadow-sm font-medium flex items-center gap-2"
+          >
+            + Create Shift
+          </button>
+        )}
+      </div>
+
+      {shifts.length === 0 ? (
+        <div className="text-center py-12 bg-white rounded-xl border border-gray-200">
+          <AlertCircle className="mx-auto h-12 w-12 text-gray-400 mb-3" />
+          <h3 className="text-lg font-medium text-gray-900">No shifts available</h3>
+          <p className="text-gray-500 mt-1">Check back later for new opportunities.</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+          {shifts.map((shift) => {
+            const isFull = shift.registeredCount >= shift.capacity;
+            const isRegistered = userRegistrations[shift.id];
+            const isPast = new Date(shift.date) < new Date(new Date().setHours(0,0,0,0));
+
+            return (
+              <div key={shift.id} className={cn("bg-white rounded-xl shadow-sm border p-6 flex flex-col transition-all hover:shadow-md", 
+                isPast ? "border-gray-200 opacity-60" : "border-indigo-100"
+              )}>
+                <div className="flex justify-between items-start mb-3">
+                  <h3 className="text-lg font-bold text-gray-900 leading-tight">{shift.title}</h3>
+                  {isRegistered && (
+                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                      <CheckCircle className="w-3 h-3 mr-1" />
+                      Joined
+                    </span>
+                  )}
+                  {isFull && !isRegistered && (
+                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                      Full
+                    </span>
+                  )}
+                </div>
+                
+                <div className="space-y-2.5 mb-4 text-sm text-gray-600 flex-1 bg-gray-50 p-3 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    <CalendarIcon className="w-4 h-4 text-indigo-500 shrink-0" />
+                    <span className="font-medium">{new Date(shift.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Clock className="w-4 h-4 text-indigo-500 shrink-0" />
+                    <span>{shift.startTime} - {shift.endTime}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <MapPin className="w-4 h-4 text-indigo-500 shrink-0" />
+                    <span className="truncate">{shift.location}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Users className="w-4 h-4 text-indigo-500 shrink-0" />
+                    <div className="flex-1">
+                      <div className="flex justify-between mb-1">
+                        <span>{shift.registeredCount} / {shift.capacity} Filled</span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-1.5">
+                        <div 
+                          className={cn("h-1.5 rounded-full", isFull ? "bg-red-500" : "bg-indigo-500")} 
+                          style={{ width: `${Math.min((shift.registeredCount / shift.capacity) * 100, 100)}%` }}
+                        ></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <p className="text-sm text-gray-600 mb-5 line-clamp-2" title={shift.description}>{shift.description}</p>
+                
+                {user?.role === 'admin' ? (
+                  <button className="w-full bg-indigo-50 text-indigo-700 font-medium py-2.5 rounded-md hover:bg-indigo-100 transition border border-indigo-200">
+                    Manage Attendees
+                  </button>
+                ) : (
+                  <button 
+                    onClick={() => handleSignUp(shift)}
+                    disabled={isRegistered || isFull || isPast || actionLoading === shift.id}
+                    className={cn(
+                      "w-full font-medium py-2.5 rounded-md transition duration-200 shadow-sm",
+                      isRegistered 
+                        ? "bg-green-50 text-green-700 border border-green-200 cursor-not-allowed" 
+                        : isFull || isPast
+                          ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                          : "bg-indigo-600 text-white hover:bg-indigo-700 focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                    )}
+                  >
+                    {actionLoading === shift.id ? 'Processing...' : 
+                     isRegistered ? 'You are registered' : 
+                     isPast ? 'Shift Ended' :
+                     isFull ? 'Shift Full' : 
+                     'Sign Up for Shift'}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+--- FILE END: src\pages\Shifts.tsx ---
